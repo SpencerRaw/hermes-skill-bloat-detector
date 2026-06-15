@@ -1,7 +1,7 @@
 ---
 name: skill-bloat-detector
 description: 检测和诊断「技能越多、智能体越蠢」的 skill bloat 现象。静态分析 + benchmark 实测 + 一键修复。已实战验证：203→132 技能，分数 6→9。
-version: 1.1.0
+version: 1.2.0
 metadata:
   hermes:
     tags: [meta-skill, skill-management, benchmarking, diagnostics, skill-bloat]

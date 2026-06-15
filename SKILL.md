@@ -11,7 +11,53 @@ metadata:
 
 > **核心问题**：Skills 越多 → 系统 prompt 中 available_skills 块越大 → 注意力稀释 + 技能选择错误率上升 + context 预算被挤占 → 智能体表现出「变蠢」。
 >
-> 本 skill 不猜测，**跑数据、跑测试、给出可复现的诊断**。已在 203 技能的真实环境中实战验证。
+> 不猜测，**跑数据、跑测试、给出可复现的诊断**。已在 203→132 真实环境验证。
+
+## 触发条件
+
+当用户说以下任一表述时，加载本 skill：
+- 「检测/检查/诊断 skill bloat」「skills 是不是太多了」「技能膨胀」
+- 「一键优化」「清理技能」「给 skills 瘦身」
+- 「技能体检」「agent 变蠢了是不是技能太多」
+
+## 安装（供他人使用）
+
+```bash
+hermes skills install https://raw.githubusercontent.com/SpencerRaw/hermes-skill-bloat-detector/main/SKILL.md
+```
+
+GitHub: https://github.com/SpencerRaw/hermes-skill-bloat-detector
+
+---
+
+## 快速决策树
+
+```
+用户说「检测」 → 先跑健康快检（30秒）→ 全绿则报告健康，有红/黄则进入 Phase 0
+用户说「一键优化」 → 直接跑 Phase 0→1→修复（P0→P1→P2）→ 验证
+用户说「只分析不修」 → 跑 Phase 0+1，出报告，不修
+```
+
+### 健康快检（30秒，零修改）
+
+```bash
+SKILLS=~/.hermes/skills
+TOTAL=$(find $SKILLS -path '*/.archive' -prune -o -name 'SKILL.md' -print | wc -l | tr -d ' ')
+TEXT_KB=$(find $SKILLS -path '*/.archive' -prune -o -name 'SKILL.md' -exec cat {} + | wc -c | awk '{printf "%.0f", $1/1024}')
+DUPES=$(find $SKILLS -name 'SKILL.md' -exec grep -l '^name:' {} \; | while read f; do grep '^name:' "$f" | head -1 | sed 's/name: *//'; done | sort | uniq -d | wc -l | tr -d ' ')
+NEW7=$(find $SKILLS -path '*/.archive' -prune -o -name 'SKILL.md' -mtime -7 -print | wc -l | tr -d ' ')
+
+[ -f "$SKILLS/.usage.json" ] && ZOMBIES=$(python3 -c "import json; d=json.load(open('$SKILLS/.usage.json')); print(len([k for k,v in d.items() if v.get('use_count',0)==0]))") || ZOMBIES="N/A"
+
+echo "技能总数: $TOTAL  |  文本: ${TEXT_KB}KB  |  重复名: $DUPES  |  7天新增: $NEW7  |  僵尸: $ZOMBIES"
+[ "$TOTAL" -gt 150 ] && echo "🔴 技能过多" || [ "$TOTAL" -gt 100 ] && echo "🟡 技能偏多" || echo "🟢 数量健康"
+[ "$TEXT_KB" -gt 1500 ] && echo "🔴 文本膨胀" || [ "$TEXT_KB" -gt 800 ] && echo "🟡 文本偏大" || echo "🟢 文本健康"
+[ "$DUPES" -gt 0 ] && echo "🔴 有重复副本" || echo "🟢 无重复"
+[ "$NEW7" -gt 10 ] && echo "🔴 增长过快" || [ "$NEW7" -gt 5 ] && echo "🟡 增长偏快" || echo "🟢 增长正常"
+[ "$ZOMBIES" != "N/A" ] && { [ "$ZOMBIES" -gt $((TOTAL/3)) ] && echo "🔴 僵尸过多" || [ "$ZOMBIES" -gt $((TOTAL/5)) ] && echo "🟡 僵尸偏多" || echo "🟢 僵尸占比健康"; }
+```
+
+**判定**：全 🟢 → 健康，无需深度检测。任一 🔴 → 进入 Phase 0。
 
 ---
 
@@ -26,6 +72,22 @@ metadata:
 | 5 | **僵尸技能** | 🟡 中度 | 大量创建后从未使用——纯浪费 token。实测 56/123 = 45% |
 | 6 | **重复技能** | 🟡 中度 | 同一 SKILL.md 在多目录有副本（如 maestro 的 .claude/.codex/.factory 三份） |
 | 7 | **Prompt 缓存失效** | 🟡 中度 | 技能频繁增删改 → 系统 prompt 变化 → 缓存命中率下降 |
+
+---
+
+## 前置检查
+
+执行修复前确认：
+```bash
+# 1. gh 已认证（用于可能的 GitHub 操作）
+gh auth status 2>/dev/null || echo "⚠️ gh 未认证"
+
+# 2. 确认有 curator 数据（否则僵尸分析不可用）
+[ -f ~/.hermes/skills/.usage.json ] && echo "✅ curator 数据存在" || echo "⚠️ 无 .usage.json — curator 未运行，无法检测僵尸"
+
+# 3. 确认 .archive 目录结构
+mkdir -p ~/.hermes/skills/.archive
+```
 
 ---
 
@@ -333,6 +395,43 @@ Subagent 看不到 available_skills 列表——T3/T5/T6 类测试必须在主 a
 
 ### 陷阱 5：hub-installed 技能的结构性修改
 对 Community contribution / hub-installed 的技能，只归档不修改内容。对 agent 创建的技能可以自由合并/修改。
+
+---
+
+## 可持续维护（防复发）
+
+修复一次不够——需要防止僵尸技能再次堆积。
+
+### 方案 A：curator 自动清理（推荐）
+
+```bash
+hermes config set curator.enabled true
+hermes config set curator.stale_after_days 30
+hermes config set curator.archive_after_days 60
+```
+
+curator 会自动追踪使用频率，标记 30 天未用的技能为 stale，60 天归档。
+
+### 方案 B：每周健康快检 cron
+
+```bash
+# 创建一个每周一早上跑的健康快检 cron
+# 把上面的「健康快检」脚本设为 cronjob
+```
+
+在 Hermes 会话中：
+```
+"帮我创建一个每周一早8点的 cron，跑 skill-bloat-detector 的健康快检，如果有 🔴 就提醒我"
+```
+
+Agent 会用 `cronjob` 工具创建，prompt 指向本 skill 的「健康快检」章节。
+
+### 方案 C：新增技能前的检查清单
+
+每次 agent 想 `skill_manage(action='create')` 前，先问自己：
+1. 这个技能的功能是否已有技能覆盖？（先 `skills_list` 搜关键词）
+2. 如果已有，能否 patch 到现有技能里？（用 `skill_manage(action='patch')`）
+3. 如果必须新建，description 是否足够差异化？（避免和已有技能混淆）
 
 ---
 
